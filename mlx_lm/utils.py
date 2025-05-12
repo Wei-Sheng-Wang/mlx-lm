@@ -17,6 +17,7 @@ from typing import (
     Tuple,
     Type,
     Union,
+    List
 )
 
 import mlx.core as mx
@@ -554,3 +555,8 @@ def common_prefix_len(list1, list2):
     # No mismatch found within the bounds of the shorter list,
     # so the common prefix length is the length of the shorter list.
     return min_len
+
+
+
+
+

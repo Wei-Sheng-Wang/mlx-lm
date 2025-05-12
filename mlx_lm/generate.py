@@ -402,6 +402,7 @@ def generate_step(
         n += 1
 
 
+
 def speculative_generate_step(
     prompt: mx.array,
     model: nn.Module,

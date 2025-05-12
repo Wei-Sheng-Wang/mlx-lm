@@ -1,13 +1,14 @@
 # Copyright © 2023-2024 Apple Inc.
 
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Optional, Union, List
 
 import mlx.core as mx
 import mlx.nn as nn
 
 from .base import BaseModelArgs, create_attention_mask, scaled_dot_product_attention
 from .rope_utils import initialize_rope
+from .paged_kvcache import PagedKVCache
 
 
 @dataclass
@@ -155,6 +156,23 @@ class Qwen3Model(nn.Module):
             h = layer(h, mask, c)
 
         return self.norm(h)
+
+    def make_cache(self, max_len: int, block_size: int, num_blocks: Optional[int] = None) -> List[PagedKVCache]:
+        """Create a PagedKVCache per layer for autoregressive generation."""
+        if num_blocks is None:
+            num_blocks = (max_len + block_size - 1) // block_size
+        caches: List[PagedKVCache] = []
+        for _ in range(self.args.num_hidden_layers):
+            cache = PagedKVCache(
+                num_layers=1,
+                num_heads=self.args.num_key_value_heads,
+                head_dim=self.args.head_dim,
+                num_blocks=num_blocks,
+                block_size=block_size,
+                dtype=mx.float32,
+            )
+            caches.append(cache)
+        return caches
 
 
 class Model(nn.Module):

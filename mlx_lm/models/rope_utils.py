@@ -6,6 +6,9 @@ from typing import Optional
 import mlx.core as mx
 import mlx.nn as nn
 
+# Import the new adapter
+from .batched_rope import BatchedRoPEAdapter
+
 
 class Llama3RoPE(nn.Module):
 
@@ -148,18 +151,48 @@ def initialize_rope(
     else:
         rope_type = "default"
 
+    # Temporary RoPE instance for parameter extraction
+    temp_rope_instance = None
+    yarn_mscale_factor = None
+    traditional_scaling_for_adapter = False # Flag for nn.RoPE-like x scaling
+    freqs_for_adapter = None
+    position_scale_factor_for_adapter = 1.0
+
     if rope_type in ["default", "linear"]:
-        scale = 1 / scaling_config["factor"] if rope_type == "linear" else 1.0
-        return nn.RoPE(dims, traditional=traditional, base=base, scale=scale)
+        # For mlx.nn.RoPE (default or linear scaling)
+        # nn.RoPE calculates inv_freq from `base` and applies `scale` to positions.
+        # If traditional=True, it also scales x by `scale`.
+        # BatchedRoPEUtility uses `frequencies` (direct freqs) and `position_scale_factor`.
+        actual_base = base
+        freqs_for_adapter = 1.0 / (actual_base ** (mx.arange(0, dims, 2, dtype=mx.float32) / dims))
+        
+        position_scale_factor_for_adapter = 1.0
+        if rope_type == "linear":
+            if scaling_config and "factor" in scaling_config:
+                # nn.RoPE's `scale` is 1/factor for linear scaling of positions
+                position_scale_factor_for_adapter = 1.0 / scaling_config["factor"]
+            else:
+                raise ValueError("Linear scaling RoPE requires a 'factor' in scaling_config.")
+        
+        # If traditional is True, nn.RoPE scales x by its `scale` parameter.
+        # The adapter needs to know to do this if not YARN mscale.
+        if traditional:
+            traditional_scaling_for_adapter = True 
+            # The `position_scale_factor_for_adapter` is already set correctly for position scaling.
+            # The adapter will use this same factor to scale x if traditional_scaling_for_adapter is true.
 
     elif rope_type == "llama3":
-        return Llama3RoPE(
+        temp_rope_instance = Llama3RoPE(
             dims=dims,
             max_position_embeddings=max_position_embeddings,
-            traditional=traditional,
+            traditional=traditional, # Llama3RoPE doesn't use traditional flag in its math but pass for consistency
             base=base,
             scaling_config=scaling_config,
         )
+        freqs_for_adapter = temp_rope_instance._freqs
+        # Llama3RoPE uses mx.fast.rope with scale=1.0, positions are scaled via _freqs
+        position_scale_factor_for_adapter = 1.0 
+
     elif rope_type == "yarn":
         scaling_factor = scaling_config["factor"]
         rope_kwargs = {
@@ -173,12 +206,26 @@ def initialize_rope(
             ]
             if key in scaling_config
         }
-        return YarnRoPE(
+        temp_rope_instance = YarnRoPE(
             dims=dims,
             max_position_embeddings=max_position_embeddings,
-            traditional=traditional,
+            traditional=traditional, # YarnRoPE doesn't use traditional flag in its math but pass for consistency
             base=base,
+            scaling_factor=scaling_factor, # Pass the main scaling_factor here
             **rope_kwargs,
         )
+        freqs_for_adapter = temp_rope_instance._freqs
+        yarn_mscale_factor = temp_rope_instance.mscale
+        # YarnRoPE uses mx.fast.rope with scale=1.0, positions are scaled via _freqs
+        # mscale is handled separately for x
+        position_scale_factor_for_adapter = 1.0 
     else:
         raise ValueError(f"Unsupported RoPE type {rope_type}")
+
+    return BatchedRoPEAdapter(
+        dims=dims,
+        frequencies=freqs_for_adapter,
+        position_scale_factor=position_scale_factor_for_adapter,
+        yarn_mscale_factor=yarn_mscale_factor,
+        traditional_scaling=traditional_scaling_for_adapter
+    )

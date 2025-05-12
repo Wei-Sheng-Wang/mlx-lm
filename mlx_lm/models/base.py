@@ -131,3 +131,33 @@ def scaled_dot_product_attention(
         return mx.fast.scaled_dot_product_attention(
             queries, keys, values, scale=scale, mask=mask
         )
+
+
+def create_attention_mask(
+    h: mx.array, 
+    cache: Optional[Any] = None, 
+    lengths: Optional[mx.array] = None,
+    return_array: bool = False
+):
+    if lengths:
+        return create_causal_mask(int(lengths.max()), offset=0, lengths=lengths)
+
+    T = h.shape[1]
+    if T > 1:
+        offset = 0
+        window_size = None
+        if cache is not None and cache[0] is not None:
+            c = cache[0]
+            offset = c.offset
+            if hasattr(c, "max_size"):
+                window_size = c.max_size
+                offset = min(window_size, offset)
+                return_array = return_array or offset + T > window_size
+        if return_array:
+            return create_causal_mask(T, offset, window_size=window_size)
+        else:
+            return "causal"
+    else:
+        mask = None
+    return mask
+
