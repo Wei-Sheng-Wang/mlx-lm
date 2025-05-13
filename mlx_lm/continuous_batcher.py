@@ -11,7 +11,6 @@ from mlx.utils import tree_map
 from .models import cache
 from .sample_utils import make_sampler
 from .tokenizer_utils import TokenizerWrapper
-from .generate import maybe_quantize_kv_cache
 from .models.cache import make_prompt_cache
 from .models.qwen3 import create_attention_mask
 
@@ -127,10 +126,7 @@ class ContinuousBatcher:
             raise ValueError(f"Invalid prompt type: {type(prompt)}")
 
         token_ids = mx.array(token_ids)
-        detok = self.tokenizer.detokenizer
-        detok.reset()
-        for t in token_ids:
-            detok.add_token(t)
+      
         # add sequence id to the cache  
         # add sequence id to the cache  
         kv_cache = make_prompt_cache(self.model, max_kv_size=max_kv_size, block_size=block_size, num_blocks=num_blocks)
@@ -170,24 +166,84 @@ class ContinuousBatcher:
 
         # get the token ids
         next_ids = mx.array([r.next_input_token_id for r in active_requests], dtype=mx.uint32)
-        batch = next_ids[: None] # shape (B, 1)
+        batch = next_ids[:, None]  # shape (B, 1): add sequence-length dimension
 
-            
+
         # 3) build a full boolean mask (causal + pad-mask) of shape [B, K, K]
         #    K = max over all offset lengths in this batch
-        offsets = mx.array([r.kv_cache[0].offset for r in active_requests], dtype=mx.int32)
+        # These are the correct current lengths of each sequence in the batch
+        # before processing the current token. These are what RoPE needs.
+        current_batch_rope_offsets = mx.array([r.kv_cache[0].offset[0] for r in active_requests],
+                   dtype=mx.int32)   # shape (B,)
+        print(f"[continuous_batcher.py] batch.shape: {batch.shape}") # DEBUG
+        print(f"[continuous_batcher.py] current_batch_rope_offsets.shape: {current_batch_rope_offsets.shape}") # DEBUG
+        print(f"[continuous_batcher.py] current_batch_rope_offsets: {current_batch_rope_offsets}") # DEBUG
+            
         # bottom-line API: pass lengths to get both causal+pad
         mask = create_attention_mask(
-            h=None,
-            cache=None,
-            lengths=offsets,
+            h=batch, # Pass current batch to help determine query seq length (N_q)
+            cache=None, # Mask creation doesn't need the actual cache object if lengths are given
+            lengths=current_batch_rope_offsets, # Pass the true current lengths
             return_array=True
-        )  # shape [B, K, K]
+
+        )  # shape [B, N_q, K_max]
+
+        # is this correct
+        caches_for_model = active_requests[0].kv_cache # Still using req[0]'s cache for KV store
+
+        logits = self.model(batch, mask=mask, cache=caches_for_model, rope_offsets=current_batch_rope_offsets)
+        # logits shape is (B, 1, V)
+
+        # compute log probs + sample (or greefy next token)
+        logprobs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
+
+        logprobs = logprobs[:, 0, :]
+
+            # sample next token
+        sampler = self.sampler or (lambda x: mx.argmax(x, axis=-1))
+        new_ids = sampler(logprobs)   # shape [B]
 
 
-        caches = 
+        # 7) build one AsyncResponse per request & advance its state
+        responses: List[AsyncResponse] = []
+        for i, req in enumerate(active_requests):
+            tok = int(new_ids[i].item())
+            req.next_input_token_id = tok
+            req.tokens_generated += 1
+            req.all_generated_token_ids.append(tok)
 
+            # detokenize only the newly-added token
+            req.detokenizer.add_token(tok)
+            segment = req.detokenizer.last_segment
 
+            # check stopping criteria
+            done = False
+            reason = None
+            if tok in req.detokenizer._eos_token_ids:
+                done = True
+                reason = "eos"
+            elif req.tokens_generated >= req.max_output_tokens:
+                done = True
+                reason = "length"
+
+            if done:
+                req.finished = True
+                req.finish_reason = reason
+                req.detokenizer.finalize()
+                req.full_text = req.detokenizer.text
+
+            responses.append(
+                AsyncResponse(
+                    request_id=req.request_id,
+                    token_id=tok,
+                    logprobs=logprobs[i],
+                    text_segment=segment,
+                    finished=done,
+                    finish_reason=reason,
+                )
+            )
+
+        return responses
 
 
 

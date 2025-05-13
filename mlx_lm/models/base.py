@@ -8,6 +8,7 @@ import mlx.core as mx
 from mlx.utils import tree_map
 
 from .cache import QuantizedKVCache
+from .paged_kvcache import PagedKVCache
 
 
 @dataclass
@@ -29,40 +30,77 @@ def create_causal_mask(
     window_size: Optional[int] = None,
     lengths: Optional[mx.array] = None,
 ):
+    """
+    Create a causal mask for sequence length N with an optional offset and window.
+    Supports scalar offset or batched offsets (list or mx.array of shape (B,)).
+    """
+    # Batched offsets path
+    if isinstance(offset, (list, tuple)) or (hasattr(offset, 'ndim') and getattr(offset, 'ndim', 0) > 0):
+        offsets = mx.array(offset) if not isinstance(offset, mx.ndarray) else offset
+        B = offsets.shape[0]
+        base = mx.arange(N)
+        # rinds[b,j] = offsets[b] + j
+        rinds = offsets[:, None] + base[None, :]
+        # linds[b,i] = offsets[b] + i
+        linds = offsets[:, None] + base[None, :]
+        mask = linds[:, :, None] >= rinds[:, None, :]
+        if window_size is not None:
+            ws = window_size if isinstance(window_size, (list, tuple, mx.ndarray)) else [window_size] * B
+            ws_arr = mx.array(ws) if not isinstance(ws, mx.ndarray) else ws
+            mask &= (linds[:, :, None] <= rinds[:, None, :] + ws_arr[:, None, None])
+        if lengths is not None:
+            mask &= (rinds[:, :, None] < lengths[:, None, None])
+        return mask
+    # Scalar offset path
     rinds = mx.arange(offset + N)
-    linds = mx.arange(offset, offset + N) if offset else rinds
+    linds = mx.arange(offset, offset + N) if offset else mx.arange(N)
     linds = linds[:, None]
     rinds = rinds[None]
     mask = linds >= rinds
     if window_size is not None:
-        mask = mask & (linds <= rinds + window_size)
+        mask &= (linds <= rinds + window_size)
     if lengths is not None:
-        lengths = lengths[:, None, None, None]
-        mask = mask & (rinds < lengths)
+        lengths_arr = lengths[:, None, None, None] if isinstance(lengths, mx.ndarray) else lengths
+        mask &= (rinds < lengths_arr)
     return mask
 
 
 def create_attention_mask(
-    h: mx.array, cache: Optional[Any] = None, return_array: bool = False
+    h: mx.array,  # shape: (B, T, D)
+    cache: Optional[Any] = None, 
+    return_array: bool = False, 
 ):
-    T = h.shape[1]
-    if T > 1:
-        offset = 0
-        window_size = None
-        if cache is not None and cache[0] is not None:
-            c = cache[0]
-            offset = c.offset
-            if hasattr(c, "max_size"):
-                window_size = c.max_size
-                offset = min(window_size, offset)
-                return_array = return_array or offset + T > window_size
-        if return_array:
-            return create_causal_mask(T, offset, window_size=window_size)
-        else:
-            return "causal"
-    else:
-        mask = None
-    return mask
+    B, T, _ = h.shape
+    if T <= 1:
+        return None
+    # PagedKVCache batched offsets mask
+    if cache is not None and cache[0] is not None and isinstance(cache[0], PagedKVCache):
+        paged = cache[0]
+        offsets = mx.array(paged.offsets)
+        max_offset = int(mx.max(offsets).item())
+        total_K = max_offset + T
+        # global key positions [0 .. total_K-1]
+        rinds = mx.arange(total_K)[None, :]
+        # new token positions per sequence
+        linds = offsets[:, None] + mx.arange(T)[None, :]
+        # broadcast to compute causal mask: (B, T, total_K)
+        mask = linds[:, :, None] >= rinds[None, :, :]
+        # add head axis so mask is (B,1,T,K) and broadcasts over heads
+        mask = mask[:, None, :, :]
+        return mask
+    # Fallback for scalar-offset caches
+    offset = 0
+    window_size = None
+    if cache is not None and cache[0] is not None:
+        c = cache[0]
+        offset = c.offset
+        if hasattr(c, "max_size"):
+            window_size = c.max_size
+            offset = min(window_size, offset)
+            return_array = return_array or (offset + T > window_size)
+    if return_array:
+        return create_causal_mask(T, offset, window_size=window_size)
+    return "causal"
 
 
 def quantized_scaled_dot_product_attention(
@@ -133,31 +171,4 @@ def scaled_dot_product_attention(
         )
 
 
-def create_attention_mask(
-    h: mx.array, 
-    cache: Optional[Any] = None, 
-    lengths: Optional[mx.array] = None,
-    return_array: bool = False
-):
-    if lengths:
-        return create_causal_mask(int(lengths.max()), offset=0, lengths=lengths)
-
-    T = h.shape[1]
-    if T > 1:
-        offset = 0
-        window_size = None
-        if cache is not None and cache[0] is not None:
-            c = cache[0]
-            offset = c.offset
-            if hasattr(c, "max_size"):
-                window_size = c.max_size
-                offset = min(window_size, offset)
-                return_array = return_array or offset + T > window_size
-        if return_array:
-            return create_causal_mask(T, offset, window_size=window_size)
-        else:
-            return "causal"
-    else:
-        mask = None
-    return mask
 

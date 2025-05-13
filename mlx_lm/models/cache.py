@@ -8,12 +8,12 @@ from mlx.utils import tree_flatten, tree_map, tree_unflatten
 
 from dataclasses import dataclass
 from typing import TypeVar, List
-from mlx_lm.models.qwen3 import Qwen3Model
 T = TypeVar("T", bound="KVCache")
 
 def make_prompt_cache(
     model: nn.Module,
     max_kv_size: Optional[int] = None,
+    use_paged_kvcache: bool = False,
     block_size: Optional[int] = None,
     num_blocks: Optional[int] = None,
 
@@ -31,14 +31,8 @@ def make_prompt_cache(
             size of ``max_kv_size``
     """
     if hasattr(model, "make_cache"):
-        # if model is qwen3, use the paged kvcache
-        if isinstance(model, Qwen3Model):
-            return model.make_cache(
-                max_len=max_kv_size,
-                block_size=block_size,
-                num_blocks=num_blocks,
-
-            )
+        if use_paged_kvcache:
+            return model.make_cache(len(model.layers), block_size, num_blocks)
         else:
             return model.make_cache()
 

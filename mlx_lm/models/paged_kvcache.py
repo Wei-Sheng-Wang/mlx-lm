@@ -27,7 +27,6 @@ class PagedKVCache:
 
         self.block_ref_counts: List[int] = [0] * self.num_blocks
 
-
     def add_sequence(self, seq_id: int, max_len: int):
         if seq_id in self.block_tables:
             raise ValueError(f"Sequence {seq_id} already exists")
@@ -219,13 +218,7 @@ class PagedKVCache:
         self.seq_lengths[seq_id] = max_len
             
 
-    @property
-    def offsets(self) -> Dict[int, int]: # Or return a list/array if batch is implied
-        return self.seq_lengths
 
-    # If you need it for a specific batch:
-    def get_offsets_for_batch(self, seq_ids_in_batch: List[int]) -> mx.array:
-        return mx.array([self.seq_lengths[seq_id] for seq_id in seq_ids_in_batch])
 
     def update_and_fetch(self, keys: mx.array, values: mx.array):
         """Append new keys/values and return the stacked cache for single-layer usage."""
@@ -234,7 +227,8 @@ class PagedKVCache:
         if self.num_layers != 1:
             raise ValueError(f"PagedKVCache.update_and_fetch only supports num_layers=1, got {self.num_layers}")
         layer_idx = 0
-        seq_ids = list(range(B))
+        
+        seq_ids = list(self.seq_lengths.keys())
         for i, s in enumerate(seq_ids):
             if s not in self.block_tables:
                 # lazily register sequence with no preallocation
@@ -244,6 +238,5 @@ class PagedKVCache:
         return k, v
 
     @property
-    def offset(self) -> int:
-        """Return the current sequence length for the single registered sequence ID 0."""
-        return self.seq_lengths.get(0, 0)
+    def offsets(self) -> list:
+        return list(self.seq_lengths.values())

@@ -74,6 +74,7 @@ class BatchedRoPEUtility(nn.Module):
         
         # Determine effective batch size for broadcasting positions and angles
         # This batch_size will be used for operations involving offsets and frequencies
+
         effective_batch_size = max(batch_size_x, offsets.shape[0])
 
         num_heads, seq_len, head_dims_x = x_reshaped.shape[1], x_reshaped.shape[2], x_reshaped.shape[-1]
@@ -195,7 +196,7 @@ class BatchedRoPEAdapter(nn.Module):
         
         self._batched_rope_utility = BatchedRoPEUtility(dims=dims)
 
-    def __call__(self, x: mx.array, offset: int = 0) -> mx.array:
+    def __call__(self, x: mx.array, offset: Union[int, list[int], mx.array] = 0) -> mx.array:
         """
         Args:
             x (mx.array): Input tensor.
@@ -204,11 +205,20 @@ class BatchedRoPEAdapter(nn.Module):
         Returns:
             mx.array: The input tensor with rotary embeddings applied.
         """
-        # BatchedRoPEUtility expects offsets as a 1D array (batch_size,)
-        # For a single sequence (batch_size=1) from typical Attention layer usage, this is (1,)
-        offsets = mx.array(offset) if isinstance(offset, list)
+        # Ensure offsets is always a 1D mx.array
+        if isinstance(offset, int):
+            offsets = mx.array([offset], dtype=mx.int32)
+        elif isinstance(offset, list):
+            offsets = mx.array(offset, dtype=mx.int32)
+        else:
+            offsets = offset  # assume already mx.array
         x_to_rope = x
         
+        # Handle empty offsets by initializing to zeros for each batch item
+        if offsets.ndim == 1 and offsets.shape[0] == 0:
+            batch_size = x_to_rope.shape[0] if x_to_rope.ndim >= 1 else 1
+            offsets = mx.zeros((batch_size,), dtype=offsets.dtype)
+
         if self.apply_yarn_mscale:
             # YarnRoPE applies mscale internally before rotation.
             # We replicate this by scaling x before passing to BatchedRoPEUtility.

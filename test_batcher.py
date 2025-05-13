@@ -13,23 +13,13 @@ def main():
 
     batcher = ContinuousBatcher(model, tokenizer)
 
-    # Submit multiple test requests
-    prompts = [
-        "Hello, my name is",
-        "The capital of France is",
-        "Once upon a time, in a land far away,",
-        "In a galaxy far, far away, there was",
-        "To be or not to be, that is the question:",
-        "What is the meaning of life?",
-        "Data science is",
-        "The quick brown fox jumps over the lazy dog",
-        "Explain quantum mechanics in simple terms.",
-        "List the first ten prime numbers:",
-    ]
+    # Test with a batch of 10 identical prompts
+    prompt = "Hello, my name is"
+    prompts = [prompt] * 10
     req_ids = []
     for p in prompts:
         # Use moderate temperature for variety
-        req_ids.append(batcher.submit(p, max_tokens=10, temperature=0.7))
+        req_ids.append(batcher.submit(p, max_tokens=10, temperature=0))
 
     print(f"Submitted {len(req_ids)} requests: {req_ids}")
     active_requests = set(req_ids)

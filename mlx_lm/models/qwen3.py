@@ -1,7 +1,7 @@
 # Copyright © 2023-2024 Apple Inc.
 
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Union, List
+from typing import Any, Dict, Optional, Union
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -9,6 +9,7 @@ import mlx.nn as nn
 from .base import BaseModelArgs, create_attention_mask, scaled_dot_product_attention
 from .rope_utils import initialize_rope
 from .paged_kvcache import PagedKVCache
+from .cache import KVCache
 
 
 @dataclass
@@ -74,8 +75,8 @@ class Attention(nn.Module):
         values = values.reshape(B, L, self.n_kv_heads, -1).transpose(0, 2, 1, 3)
 
         if cache is not None:
-            queries = self.rope(queries, offset=cache.offset)
-            keys = self.rope(keys, offset=cache.offset)
+            queries = self.rope(queries, offset=cache.offsets)
+            keys = self.rope(keys, offset=cache.offsets)
             keys, values = cache.update_and_fetch(keys, values)
         else:
             queries = self.rope(queries)
@@ -157,23 +158,6 @@ class Qwen3Model(nn.Module):
 
         return self.norm(h)
 
-    def make_cache(self, max_len: int, block_size: int, num_blocks: Optional[int] = None) -> List[PagedKVCache]:
-        """Create a PagedKVCache per layer for autoregressive generation."""
-        if num_blocks is None:
-            num_blocks = (max_len + block_size - 1) // block_size
-        caches: List[PagedKVCache] = []
-        for _ in range(self.args.num_hidden_layers):
-            cache = PagedKVCache(
-                num_layers=1,
-                num_heads=self.args.num_key_value_heads,
-                head_dim=self.args.head_dim,
-                num_blocks=num_blocks,
-                block_size=block_size,
-                dtype=mx.float32,
-            )
-            caches.append(cache)
-        return caches
-
 
 class Model(nn.Module):
     def __init__(self, args: ModelArgs):
@@ -205,3 +189,27 @@ class Model(nn.Module):
     @property
     def layers(self):
         return self.model.layers
+    
+
+    def make_cache(self, num_layers=None, block_size=None, num_blocks=None):
+        """
+        Create a list of KV-caches for generation. If num_layers, block_size, and num_blocks
+        are provided, initialize PagedKVCache for each layer; otherwise fall back to simple KVCache.
+        """
+        # PagedKVCache path
+        if num_layers is not None and block_size is not None and num_blocks is not None:
+            caches = []
+            for _ in range(num_layers):
+                caches.append(
+                    PagedKVCache(
+                        num_layers=1,
+                        num_heads=self.args.num_key_value_heads,
+                        head_dim=self.args.head_dim,
+                        num_blocks=num_blocks,
+                        block_size=block_size,
+                        dtype=mx.float32,
+                    )
+                )
+            return caches
+        # Default single-step KVCache per layer
+        return [KVCache() for _ in range(len(self.layers))]
